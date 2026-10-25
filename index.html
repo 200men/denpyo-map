@@ -76,6 +76,19 @@ textarea:focus-visible,input.t:focus-visible{outline:2px solid var(--accent);out
 details{font-size:12px;color:var(--muted)}
 details pre{white-space:pre-wrap;font:11px/1.5 var(--mono);background:var(--bg);padding:8px;border-radius:6px;max-height:200px;overflow:auto}
 .note{font-size:12px;color:var(--muted)}
+.tip{background:var(--paper);border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:13px;color:var(--ink)}
+.tip summary{font-weight:700;cursor:pointer;color:var(--accent)}
+.tip p{margin:6px 0 0;line-height:1.6}
+.recrop{grid-column:2;justify-self:start;background:none;border:0;color:var(--accent);font:700 13px var(--display);text-decoration:underline;cursor:pointer;padding:2px 0}
+.recrop.need{background:var(--accent);color:var(--accent-ink);text-decoration:none;padding:8px 12px;border-radius:8px}
+.cropper{position:fixed;inset:0;z-index:20;background:var(--bg);display:flex;flex-direction:column;gap:10px;
+  padding-top:max(12px,env(safe-area-inset-top,0px));padding-bottom:max(12px,env(safe-area-inset-bottom,0px));
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+.cropper p{margin:0;font-weight:700;font-size:15px}
+.cropper small{color:var(--muted);font-size:12px;display:block;font-weight:400}
+.cropwrap{flex:1;min-height:0;overflow:auto;display:flex;justify-content:center;align-items:flex-start}
+#cropCanvas{max-width:100%;touch-action:none;border-radius:4px}
+.cropper .row .btn.primary[disabled]{opacity:.4}
 .confirm{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:13px}
 </style>
 </head>
@@ -95,13 +108,20 @@ details pre{white-space:pre-wrap;font:11px/1.5 var(--mono);background:var(--bg);
     <label class="scan sub" id="galBtn" for="gallery">写真<br>から
       <input type="file" id="gallery" accept="image/*" multiple aria-label="写真から追加（複数選択可）">
     </label>
-    <button class="scan sub" id="manualBtn" type="button">手<br>入力</button>
+    <button class="scan sub" id="manualBtn" type="button">文字<br>スキャン</button>
   </div>
   <div class="bar" id="bar" hidden><i id="barFill"></i></div>
   <div class="status" id="status" role="status"></div>
 
   <ol class="list" id="list"></ol>
   <div class="empty" id="empty">伝票を撮影すると、ここに配達先が並びます（最大4件）。<br>「写真から」なら撮っておいた伝票をまとめて選べます。</div>
+  <details class="tip" id="tip" open>
+    <summary>読み取りがうまくいかないときは「文字スキャン」</summary>
+    <p>スマホに入っている文字認識を使うと、ほぼ正確に読み取れます。</p>
+    <p><b>iPhone</b>：「文字スキャン」を押す → 住所欄をもう一度タップ → 出てくるメニューの「テキストをスキャン」（またはキーボード上の［⊡］マーク） → 伝票の住所にカメラを向けて「挿入」。</p>
+    <p><b>Android</b>：Googleレンズで伝票を撮り、住所の部分を選んで「コピー」→「文字スキャン」を押して住所欄に貼り付け。キーボードに「テキストをスキャン」がある機種ならそれでもOKです。</p>
+    <p>2行に分かれた住所や全角数字は、入力欄から離れると自動で整えます。</p>
+  </details>
 
   <section class="all" id="allBox" hidden>
     <a class="btn big" id="allRoute" href="#" target="_blank" rel="noopener">未配達をまとめてルート表示</a>
@@ -118,6 +138,15 @@ details pre{white-space:pre-wrap;font:11px/1.5 var(--mono);background:var(--bg);
   </section>
 
   <p class="note">文字の読み取りはこの端末の中で行い、写真は外部に送信しません。初回のみ読み取り用データ（約2MB）をダウンロードします。読み取った住所は必ず目で確認してください。</p>
+</div>
+
+<div class="cropper" id="cropper" hidden>
+  <p>住所の部分を指でなぞって囲んでください<small>「神奈川県…」の行から番地・建物名の行までを囲むと、読み取りが正確になります。</small></p>
+  <div class="cropwrap"><canvas id="cropCanvas"></canvas></div>
+  <div class="row">
+    <button class="btn" id="cropCancel" type="button">やめる</button>
+    <button class="btn primary" id="cropOk" type="button" disabled>この範囲を読み取る</button>
+  </div>
 </div>
 
 <template id="tpl">
@@ -140,6 +169,7 @@ details pre{white-space:pre-wrap;font:11px/1.5 var(--mono);background:var(--bg);
       <a class="btn nav" href="#" target="_blank" rel="noopener">ルート</a>
       <button class="btn doneBtn" type="button">完了</button>
     </div>
+    <button class="recrop" type="button" hidden>住所の範囲を選んで読み直す</button>
     <details><summary>読み取った全文</summary><pre class="raw"></pre></details>
   </li>
 </template>
@@ -156,6 +186,7 @@ details pre{white-space:pre-wrap;font:11px/1.5 var(--mono);background:var(--bg);
   // ---- 状態（この端末に保存）
   const KEY = "denpyo-stops";
   let stops = [];
+  const images = new Map(); // 伝票ID → 写真（ページを開いている間だけ）
   try { stops = JSON.parse(localStorage.getItem(KEY) || "[]"); } catch { stops = []; }
   const persist = () => { try { localStorage.setItem(KEY, JSON.stringify(stops)); } catch {} };
   let uid = Date.now();
@@ -176,8 +207,22 @@ details pre{white-space:pre-wrap;font:11px/1.5 var(--mono);background:var(--bg);
         map.setAttribute("aria-disabled", !q); nav.setAttribute("aria-disabled", !q); };
       links();
       a.addEventListener("input", () => { s.address = a.value; links(); persist(); updateAll(); });
+      // 貼り付けやテキストスキャンで入った2行の住所を整える
+      a.addEventListener("blur", () => {
+        const v = a.value;
+        if (!v.trim() || (!/[\n０-９－　 ]/.test(v))) return;
+        const r = parse(v);
+        if (r.address && /\d/.test(r.address)){
+          s.address = r.address; if (!s.building && r.building) s.building = r.building;
+        } else s.address = v.split(/\n/).map(squash).filter(Boolean).join("");
+        a.value = s.address; b.value = s.building; links(); persist(); updateAll();
+      });
       b.addEventListener("input", () => { s.building = b.value; persist(); });
       li.querySelector(".raw").textContent = s.raw || "（手入力）";
+      const rc = li.querySelector(".recrop");
+      rc.hidden = !images.has(s.id);
+      rc.classList.toggle("need", images.has(s.id) && !s.address.trim());
+      rc.onclick = () => openCrop(s.id);
       const done = li.querySelector(".doneBtn");
       done.textContent = s.done ? "戻す" : "完了"; done.classList.toggle("ok", !s.done);
       done.onclick = () => { s.done = !s.done; persist(); render(); };
@@ -185,10 +230,12 @@ details pre{white-space:pre-wrap;font:11px/1.5 var(--mono);background:var(--bg);
       li.querySelector(".down").disabled = i === stops.length - 1;
       li.querySelector(".up").onclick = () => move(i, -1);
       li.querySelector(".down").onclick = () => move(i, 1);
-      li.querySelector(".del").onclick = () => { stops.splice(i, 1); persist(); render(); };
+      li.querySelector(".del").onclick = () => { images.delete(s.id); stops.splice(i, 1); persist(); render(); };
       ul.append(li);
     });
     $("empty").hidden = stops.length > 0;
+    $("list").hidden = !stops.length;
+    try { if (stops.length && !render.tipClosed){ $("tip").open = false; render.tipClosed = true; } } catch {}
     $("cnt").textContent = stops.length;
     const full = stops.length >= MAX;
     for (const id of ["camBtn","galBtn","manualBtn"]) $(id).classList.toggle("disabled", full);
@@ -217,7 +264,7 @@ details pre{white-space:pre-wrap;font:11px/1.5 var(--mono);background:var(--bg);
     stops.sort((a, b) => (a.time || "99:99").localeCompare(b.time || "99:99")); persist(); render(); };
   $("clearBtn").onclick = () => { $("confirmBox").hidden = false; };
   $("clearNo").onclick = () => { $("confirmBox").hidden = true; };
-  $("clearYes").onclick = () => { stops = []; persist(); $("confirmBox").hidden = true; render(); setStatus(""); };
+  $("clearYes").onclick = () => { stops = []; images.clear(); persist(); $("confirmBox").hidden = true; render(); setStatus(""); };
   $("manualBtn").onclick = () => {
     if (stops.length >= MAX) return;
     const s = { id: ++uid, address: "", building: "", time: "", raw: "", done: false };
@@ -227,33 +274,58 @@ details pre{white-space:pre-wrap;font:11px/1.5 var(--mono);background:var(--bg);
 
   // ---- 住所の取り出し
   const PREF = /(北海道|東京都|京都府|大阪府|青森県|岩手県|宮城県|秋田県|山形県|福島県|茨城県|栃木県|群馬県|埼玉県|千葉県|神奈川県|新潟県|富山県|石川県|福井県|山梨県|長野県|岐阜県|静岡県|愛知県|三重県|滋賀県|兵庫県|奈良県|和歌山県|鳥取県|島根県|岡山県|広島県|山口県|徳島県|香川県|愛媛県|高知県|福岡県|佐賀県|長崎県|熊本県|大分県|宮崎県|鹿児島県|沖縄県)/;
+  const PREFS = PREF.source.slice(1, -1).split("|");
   const toHalf = s => s.replace(/[０-９Ａ-Ｚａ-ｚ]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))
                        .replace(/[－−‐―ｰ]/g, "-");
-  const squash = s => toHalf(s).replace(/[ \t　]+/g, "");
+  const squash = s => toHalf(s).replace(/[ \t　]+/g, "").replace(/(\d)[.・,，](?=\d)/g, "$1").replace(/(\d)[一ー\-]+(?=\d)/g, "$1-");
+  const HAN = /[\p{Script=Han}]/u;
+  // 住所の始まり（都道府県。1文字くらいの読み間違いも直す。なければ「〇〇市」「〇〇区」）
+  function findStart(line){
+    const m = line.match(PREF);
+    if (m) return { at: m.index, text: line.slice(m.index) };
+    if (/[市区町村郡]/.test(line)){
+      for (const p of PREFS){
+        const re = new RegExp("[^\\s]" + p.slice(1).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+        const f = line.match(re);
+        if (f) return { at: f.index, text: p + line.slice(f.index + f[0].length) };
+      }
+      const c = line.match(/[\p{Script=Han}]{1,5}[市区](?:[\p{Script=Han}]{1,4}区)?/u);
+      if (c) return { at: c.index, text: line.slice(c.index) };
+    }
+    return null;
+  }
   function parse(text){
     const lines = text.split(/\n/).map(squash).filter(Boolean);
     const out = { address: "", building: "", time: "" };
-    const tm = toHalf(text).replace(/\s+/g, "").match(/\d{2}\/\d{1,2}\/\d{1,2}\(.\)(\d{1,2}:\d{2})/);
+    const tm = toHalf(text).replace(/\s+/g, "").match(/\d{2}\/?\d{1,2}\/\d{1,2}\(.\)(\d{1,2}:\d{2})/);
     if (tm) out.time = tm[1];
-    const i = lines.findIndex(l => PREF.test(l));
+    let i = -1, st = null;
+    for (let k = 0; k < lines.length; k++){ st = findStart(lines[k]); if (st){ i = k; break; } }
     if (i < 0) return out;
-    let head = lines[i].slice(lines[i].search(PREF)).split(/[>|<\]\[{}~_*$#@]/)[0];
-    let joined = head;
-    const next = lines[i + 1] || "";
-    if (!/\d+(-\d+)+/.test(head) && /^[0-9]/.test(next)) joined += next;
-    const m = joined.match(/^(.*?\d+(?:[-ー]\d+)*)(.*)$/);
-    if (m){ out.address = m[1].replace(/ー(?=\d)/g, "-"); out.building = m[2].replace(/[^\p{L}\p{N}\-]/gu, ""); }
-    else out.address = joined;
+    const head = st.text.split(/[>|<\]\[{}~_*$#@]/)[0];
+    // 町名まで（漢字・かな）と、その後ろ
+    const mm = head.match(/^([\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}ー々ヶ]+)(.*)$/u) || [head, head, ""];
+    let town = mm[1], rest = mm[2].replace(/^[^\d]{0,2}(?=\d)/, "");
+    if (!/^\d/.test(rest)) rest = (lines[i + 1] || "").replace(/^[^\d]{0,2}(?=\d)/, "");
+    const n = /^\d/.test(rest) ? rest.match(/^(\d+(?:-\d+)*)(.*)$/) : null;
+    out.address = town + (n ? n[1] : "");
+    out.building = n ? n[2].replace(/[^\p{L}\p{N}\-]/gu, "") : "";
     return out;
   }
+  window.__parse = parse;
 
   // ---- 読み取り
-  async function prep(file){
-    const bmp = await createImageBitmap(file, { imageOrientation: "from-image" }).catch(() => null);
-    if (!bmp) return file;
-    const scale = Math.min(1, 2000 / Math.max(bmp.width, bmp.height));
-    const c = document.createElement("canvas"); c.width = Math.round(bmp.width * scale); c.height = Math.round(bmp.height * scale);
-    const g = c.getContext("2d"); g.filter = "grayscale(1) contrast(1.4)"; g.drawImage(bmp, 0, 0, c.width, c.height);
+  const loadBitmap = f => createImageBitmap(f, { imageOrientation: "from-image" });
+  // rect なし: 写真全体（最大2400px）。rect あり: その範囲を拡大して読む
+  function prep(bmp, rect){
+    const r = rect || { x: 0, y: 0, w: bmp.width, h: bmp.height };
+    const scale = rect ? Math.min(3, Math.max(1, 1800 / r.w)) : Math.min(1, 2400 / Math.max(r.w, r.h));
+    const c = document.createElement("canvas");
+    c.width = Math.round(r.w * scale); c.height = Math.round(r.h * scale);
+    if (!rect) prep.lastW = c.width;
+    const g = c.getContext("2d");
+    if (rect) g.filter = "grayscale(1)";
+    g.drawImage(bmp, r.x, r.y, r.w, r.h, 0, 0, c.width, c.height);
     return c;
   }
   let worker = null;
@@ -266,6 +338,28 @@ details pre{white-space:pre-wrap;font:11px/1.5 var(--mono);background:var(--bg);
     return worker;
   }
 
+  function addressRect(data, bmp){
+    const ls = data.lines || [];
+    const scale = bmp.width / (prep.lastW || bmp.width);
+    for (let k = 0; k < ls.length; k++){
+      if (!findStart(squash(ls[k].text))) continue;
+      const b = ls[k].bbox, lh = b.y1 - b.y0;
+      // 行の中で、間があかずに続く文字のかたまり（住所部分）だけを範囲にする
+      const ws = (ls[k].words || []).filter(w => w.text.trim()).sort((p, q) => p.bbox.x0 - q.bbox.x0);
+      let start = ws.findIndex(w => HAN.test(w.text));
+      if (start < 0) start = 0;
+      let x0 = ws.length ? ws[start].bbox.x0 : b.x0, x1 = ws.length ? ws[start].bbox.x1 : b.x1;
+      for (let j = start + 1; j < ws.length; j++){
+        if (ws[j].bbox.x0 - x1 > lh * 1.2) break;
+        x1 = ws[j].bbox.x1;
+      }
+      const X0 = Math.max(0, (x0 - lh * 0.6) * scale), X1 = Math.min(bmp.width, (x1 + lh * 1.5) * scale);
+      const Y0 = Math.max(0, (b.y0 - lh * 0.3) * scale), Y1 = Math.min(bmp.height, (b.y0 + lh * 2.6) * scale);
+      return { x: X0, y: Y0, w: X1 - X0, h: Y1 - Y0 };
+    }
+    return null;
+  }
+
   let busy = false;
   async function scanFiles(files){
     if (busy) return;
@@ -273,26 +367,86 @@ details pre{white-space:pre-wrap;font:11px/1.5 var(--mono);background:var(--bg);
     if (room <= 0){ setStatus("4件そろっています。配達が終わった伝票を消してから追加してください。", true); return; }
     files = Array.from(files).slice(0, room);
     busy = true; $("bar").hidden = false;
-    let ok = 0, ng = 0;
+    let ok = 0, ng = 0, firstNg = null;
     try {
       const w = await getWorker();
       for (let k = 0; k < files.length; k++){
         $("barFill").style.width = "0";
         setStatus(files.length > 1 ? `読み取り中… ${k + 1} / ${files.length}枚` : "読み取り中…（初回は準備に少し時間がかかります）");
-        const { data } = await w.recognize(await prep(files[k]));
-        const r = parse(data.text);
-        stops.push({ id: ++uid, address: r.address, building: r.building, time: r.time, raw: data.text, done: false });
-        r.address ? ok++ : ng++;
+        const bmp = await loadBitmap(files[k]);
+        const { data } = await w.recognize(prep(bmp));
+        let r = parse(data.text);
+        // 住所の行が見つかったら、その周辺だけを拡大して読み直す
+        const rect = addressRect(data, bmp);
+        if (rect){
+          setStatus(files.length > 1 ? `住所を詳しく読み取り中… ${k + 1} / ${files.length}枚` : "住所を詳しく読み取り中…");
+          const d2 = (await w.recognize(prep(bmp, rect))).data;
+          const r2 = parse(d2.text);
+          const score = x => (x.address ? 1 : 0) + (/\d+-\d+/.test(x.address) ? 2 : /\d/.test(x.address) ? 1 : 0) + (x.building ? 1 : 0);
+          if (score(r2) >= score(r)) r = { ...r2, time: r.time || r2.time };
+        }
+        const s = { id: ++uid, address: r.address, building: r.building, time: r.time, raw: data.text, done: false };
+        images.set(s.id, bmp);
+        stops.push(s);
+        if (r.address) ok++; else { ng++; firstNg = firstNg || s.id; }
         persist(); render();
       }
-      if (ng) setStatus(`${ok}件読み取りました。住所が見つからなかった${ng}件は手で入力してください。`, true);
-      else setStatus(`${ok}件読み取りました。住所を確認してください。`);
+      if (ng) setStatus(`住所が見つからない伝票が${ng}件あります。「住所の範囲を選んで読み直す」を押してください。`, true);
+      else setStatus(`${ok}件読み取りました。住所を確認してください。違っていたら「住所の範囲を選んで読み直す」で直せます。`);
     } catch (e) {
       console.error(e); setStatus("読み取りに失敗しました。通信状態を確認してもう一度お試しください。", true);
     } finally {
       busy = false; $("bar").hidden = true; $("photo").value = ""; $("gallery").value = "";
     }
+    if (files.length === 1 && firstNg) openCrop(firstNg);
   }
+
+  // ---- 範囲を選んで読み直す
+  const cv = $("cropCanvas"), cx = cv.getContext("2d");
+  let cropId = null, cropBmp = null, sel = null, drag = null, view = 1;
+  function drawCrop(){
+    cx.drawImage(cropBmp, 0, 0, cv.width, cv.height);
+    if (!sel) return;
+    cx.fillStyle = "rgba(0,0,0,.45)";
+    cx.fillRect(0, 0, cv.width, cv.height);
+    cx.drawImage(cropBmp, sel.x / view, sel.y / view, sel.w / view, sel.h / view, sel.x, sel.y, sel.w, sel.h);
+    cx.strokeStyle = "#ff2d4a"; cx.lineWidth = 3; cx.strokeRect(sel.x, sel.y, sel.w, sel.h);
+  }
+  function openCrop(id){
+    cropBmp = images.get(id); if (!cropBmp) return;
+    cropId = id; sel = null; $("cropOk").disabled = true;
+    $("cropper").hidden = false;
+    const maxW = Math.min(cropBmp.width, $("cropper").clientWidth - 32);
+    view = maxW / cropBmp.width;
+    cv.width = Math.round(cropBmp.width * view); cv.height = Math.round(cropBmp.height * view);
+    drawCrop();
+  }
+  const pos = e => { const b = cv.getBoundingClientRect();
+    return { x: (e.clientX - b.left) * cv.width / b.width, y: (e.clientY - b.top) * cv.height / b.height }; };
+  cv.addEventListener("pointerdown", e => { cv.setPointerCapture(e.pointerId); drag = pos(e); sel = null; drawCrop(); });
+  cv.addEventListener("pointermove", e => { if (!drag) return; const p = pos(e);
+    sel = { x: Math.min(drag.x, p.x), y: Math.min(drag.y, p.y), w: Math.abs(p.x - drag.x), h: Math.abs(p.y - drag.y) }; drawCrop(); });
+  cv.addEventListener("pointerup", () => { drag = null; $("cropOk").disabled = !(sel && sel.w > 20 && sel.h > 10); });
+  $("cropCancel").onclick = () => { $("cropper").hidden = true; };
+  $("cropOk").onclick = async () => {
+    const s = stops.find(x => x.id === cropId); if (!s || !sel) return;
+    const rect = { x: sel.x / view, y: sel.y / view, w: sel.w / view, h: sel.h / view };
+    $("cropper").hidden = true; $("bar").hidden = false; $("barFill").style.width = "0";
+    setStatus("選んだ範囲を読み取っています…");
+    try {
+      const w = await getWorker();
+      const { data } = await w.recognize(prep(cropBmp, rect));
+      const r = parse(data.text);
+      const plain = data.text.split(/\n/).map(squash).filter(Boolean).join("");
+      s.address = r.address || plain;
+      s.building = r.address ? r.building : s.building;
+      s.raw = data.text; persist(); render();
+      setStatus(r.address ? "読み直しました。住所を確認してください。" : "読み取った文字をそのまま入れました。住所の形に直してください。", !r.address);
+    } catch (e) {
+      console.error(e); setStatus("読み取りに失敗しました。もう一度お試しください。", true);
+    } finally { $("bar").hidden = true; }
+  };
+
   $("photo").addEventListener("change", e => e.target.files.length && scanFiles(e.target.files));
   $("gallery").addEventListener("change", e => e.target.files.length && scanFiles(e.target.files));
 
